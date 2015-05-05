@@ -21,6 +21,7 @@ github.com/docker/docker f5850e8e30b9420d26bd12136d8bbb6669d1e2bb
 github.com/elazarl/go-bindata-assetfs bea323321994103859d60197d229f1a94699dde3
 github.com/gogo/protobuf e888c342b46b97d9bf828e98ac755d227b57d6e8
 github.com/golang/lint dea130113ab8ebacb52dbce09c9a4c92951afdca
+github.com/google/btree cc6329d4279e3f025a53a83c397d2339b5705c45
 github.com/inconshreveable/mousetrap 76626ae9c91c4f2a10f34cad8ce83ea42c93bb75
 github.com/jteeuwen/go-bindata d0a5f1749d7a5a9a9787b0932416082c7bd0609d
 github.com/julienschmidt/httprouter 8c199fb6259ffc1af525cc3ad52ee60ba8359669
