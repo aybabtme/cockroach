@@ -20,7 +20,6 @@ package storage
 import (
 	"bytes"
 	"fmt"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +37,7 @@ import (
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 	gogoproto "github.com/gogo/protobuf/proto"
+	"github.com/google/btree"
 	"golang.org/x/net/context"
 )
 
@@ -148,20 +148,33 @@ func (e *rangeAlreadyExists) Error() string {
 	return fmt.Sprintf("range for Raft ID %d already exists on store", e.rng.Desc().RaftID)
 }
 
-// A RangeSlice is a slice of Range pointers used for replica lookups
-// by key.
-type RangeSlice []*Range
+// rangeKeyItem is a common interface for proto.Key and Range.
+type rangeKeyItem interface {
+	getKey() proto.Key
+}
 
-// Implementation of sort.Interface which sorts by StartKey from each
-// range's descriptor.
-func (rs RangeSlice) Len() int {
-	return len(rs)
+// rangeBTreeKey is a type alias of proto.Key that implements the
+// rangeKeyItem interface and the btree.Item interface.
+type rangeBTreeKey proto.Key
+
+func (k rangeBTreeKey) getKey() proto.Key {
+	return (proto.Key)(k)
 }
-func (rs RangeSlice) Swap(i, j int) {
-	rs[i], rs[j] = rs[j], rs[i]
+
+func (k rangeBTreeKey) Less(i btree.Item) bool {
+	return k.getKey().Less(i.(rangeKeyItem).getKey())
 }
-func (rs RangeSlice) Less(i, j int) bool {
-	return bytes.Compare(rs[i].Desc().StartKey, rs[j].Desc().StartKey) < 0
+
+// rangeBTreeItem is a type alias of Range that implements the rangeKeyItem
+// interface and the btree.Item interface.
+type rangeBTreeItem Range
+
+func (r *rangeBTreeItem) getKey() proto.Key {
+	return (*Range)(r).Desc().EndKey
+}
+
+func (r *rangeBTreeItem) Less(i btree.Item) bool {
+	return r.getKey().Less(i.(rangeKeyItem).getKey())
 }
 
 // A NotBootstrappedError indicates that an engine has not yet been
@@ -173,42 +186,27 @@ func (e *NotBootstrappedError) Error() string {
 	return "store has not been bootstrapped"
 }
 
-// storeRangeIterator is an implementation of rangeIterator which
-// cycles through a store's rangesByKey slice.
-type storeRangeIterator struct {
-	store     *Store
-	remaining int
-	index     int
+// storeRangeSet is an implementation of rangeSet which
+// cycles through a store's rangesByKey btree with mutex locking.
+type storeRangeSet struct {
+	store *Store
 }
 
-func newStoreRangeIterator(store *Store) *storeRangeIterator {
-	r := &storeRangeIterator{
-		store: store,
-	}
-	r.Reset()
-	return r
+func (rs *storeRangeSet) Visit(iterator func(*Range) bool) {
+	// Hold the lock except when the iterator is called.
+	rs.store.mu.Lock()
+	defer rs.store.mu.Unlock()
+	rs.store.rangesByKey.Ascend(func(i btree.Item) bool {
+		rs.store.mu.Unlock()
+		defer rs.store.mu.Lock()
+		return iterator((*Range)(i.(*rangeBTreeItem)))
+	})
 }
 
-func (si *storeRangeIterator) Next() *Range {
-	si.store.mu.Lock()
-	defer si.store.mu.Unlock()
-	if index, remaining := si.index, len(si.store.rangesByKey)-si.index; remaining > 0 {
-		si.index++
-		si.remaining = remaining - 1
-		return si.store.rangesByKey[index]
-	}
-	return nil
-}
-
-func (si *storeRangeIterator) EstimatedCount() int {
-	return si.remaining
-}
-
-func (si *storeRangeIterator) Reset() {
-	si.store.mu.Lock()
-	defer si.store.mu.Unlock()
-	si.remaining = len(si.store.rangesByKey)
-	si.index = 0
+func (rs *storeRangeSet) Count() int {
+	rs.store.mu.Lock()
+	defer rs.store.mu.Unlock()
+	return rs.store.rangesByKey.Len()
 }
 
 // A Store maintains a map of ranges by start key. A Store corresponds
@@ -236,7 +234,7 @@ type Store struct {
 
 	mu           sync.RWMutex     // Protects variables below...
 	ranges       map[int64]*Range // Map of ranges by Raft ID
-	rangesByKey  RangeSlice       // Sorted slice of ranges by StartKey
+	rangesByKey  *btree.BTree     // btree keyed by ranges end keys.
 	uninitRanges map[int64]*Range // Map of uninitialized ranges by Raft ID
 }
 
@@ -319,12 +317,13 @@ func NewStore(ctx StoreContext, eng engine.Engine, nodeDesc *proto.NodeDescripto
 		engine:       eng,
 		_allocator:   newAllocator(ctx.Gossip),
 		ranges:       map[int64]*Range{},
+		rangesByKey:  btree.New(64 /* degree */),
 		uninitRanges: map[int64]*Range{},
 		nodeDesc:     nodeDesc,
 	}
 
 	// Add range scanner and configure with queues.
-	s.scanner = newRangeScanner(ctx.ScanInterval, ctx.ScanMaxIdleTime, newStoreRangeIterator(s),
+	s.scanner = newRangeScanner(ctx.ScanInterval, ctx.ScanMaxIdleTime, &storeRangeSet{s},
 		s.updateStoreStatus)
 	s.gcQueue = newGCQueue()
 	s._splitQueue = newSplitQueue(s.ctx.DB, s.ctx.Gossip)
@@ -443,7 +442,7 @@ func (s *Store) Start(stopper *util.Stopper) error {
 			return false, err
 		}
 		s.mu.Lock()
-		err = s.addRangeInternal(rng, false /* don't sort on each addition */)
+		err = s.addRangeInternal(rng)
 		s.mu.Unlock()
 		if err != nil {
 			return false, err
@@ -462,9 +461,6 @@ func (s *Store) Start(stopper *util.Stopper) error {
 		return err
 	}
 	s.feed.endScanRanges()
-
-	// Sort the rangesByKey slice after they've all been added.
-	sort.Sort(s.rangesByKey)
 
 	// Start Raft processing goroutines.
 	if err = s.multiraft.Start(); err != nil {
@@ -658,14 +654,16 @@ func (s *Store) maybeSplitRangesByConfigs(configMap PrefixConfigMap) {
 	defer s.mu.Unlock()
 	for _, config := range configMap {
 		// Find the range which contains this config prefix, if any.
-		n := sort.Search(len(s.rangesByKey), func(i int) bool {
-			return config.Prefix.Less(s.rangesByKey[i].Desc().EndKey)
+		var rng *Range
+		s.rangesByKey.AscendGreaterOrEqual((rangeBTreeKey)(config.Prefix.Next()), func(i btree.Item) bool {
+			rng = (*Range)(i.(*rangeBTreeItem))
+			return false
 		})
 		// If the config doesn't split the range, continue.
-		if n >= len(s.rangesByKey) || !s.rangesByKey[n].Desc().ContainsKey(config.Prefix) {
+		if rng == nil || !rng.Desc().ContainsKey(config.Prefix) {
 			continue
 		}
-		s.splitQueue().MaybeAdd(s.rangesByKey[n], s.ctx.Clock.Now())
+		s.splitQueue().MaybeAdd(rng, s.ctx.Clock.Now())
 	}
 }
 
@@ -703,13 +701,15 @@ func (s *Store) setRangesMaxBytes(zoneMap PrefixConfigMap) {
 	idx := 0
 	// Note that we must iterate through the ranges in lexicographic
 	// order to match the ordering of the zoneMap.
-	for _, rng := range s.rangesByKey {
+	s.rangesByKey.Ascend(func(i btree.Item) bool {
+		rng := (*Range)(i.(*rangeBTreeItem))
 		if idx < len(zoneMap)-1 && !rng.Desc().StartKey.Less(zoneMap[idx+1].Prefix) {
 			idx++
 			zone = zoneMap[idx].Config.(*proto.ZoneConfig)
 		}
 		rng.SetMaxBytes(zone.RangeMaxBytes)
-	}
+		return true
+	})
 }
 
 // Bootstrap writes a new store ident to the underlying engine. To
@@ -755,7 +755,7 @@ func (s *Store) GetRange(raftID int64) (*Range, error) {
 }
 
 // LookupRange looks up a range via binary search over the sorted
-// "rangesByKey" RangeSlice. Returns nil if no range is found for
+// "rangesByKey" btree. Returns nil if no range is found for
 // specified key range. Note that the specified keys are transformed
 // using Key.Address() to ensure we lookup ranges correctly for local
 // keys. When end is nill, a range that contains start is looked up.
@@ -764,13 +764,16 @@ func (s *Store) LookupRange(start, end proto.Key) *Range {
 	defer s.mu.RUnlock()
 	startAddr := engine.KeyAddress(start)
 	endAddr := engine.KeyAddress(end)
-	n := sort.Search(len(s.rangesByKey), func(i int) bool {
-		return startAddr.Less(s.rangesByKey[i].Desc().EndKey)
+
+	var rng *Range
+	s.rangesByKey.AscendGreaterOrEqual((rangeBTreeKey)(startAddr.Next()), func(i btree.Item) bool {
+		rng = (*Range)(i.(*rangeBTreeItem))
+		return false
 	})
-	if n >= len(s.rangesByKey) || !s.rangesByKey[n].Desc().ContainsKeyRange(startAddr, endAddr) {
+	if rng == nil || !rng.Desc().ContainsKeyRange(startAddr, endAddr) {
 		return nil
 	}
-	return s.rangesByKey[n]
+	return rng
 }
 
 // RaftStatus returns the current raft status of the given range.
@@ -927,14 +930,23 @@ func (s *Store) NewRangeDescriptor(start, end proto.Key, replicas []proto.Replic
 
 // SplitRange shortens the original range to accommodate the new
 // range. The new range is added to the ranges map and the rangesByKey
-// sorted slice.
+// btree.
 func (s *Store) SplitRange(origRng, newRng *Range) error {
 	if !bytes.Equal(origRng.Desc().EndKey, newRng.Desc().EndKey) ||
 		bytes.Compare(origRng.Desc().StartKey, newRng.Desc().StartKey) >= 0 {
 		return util.Errorf("orig range is not splittable by new range: %+v, %+v", origRng.Desc(), newRng.Desc())
 	}
+
+	s.mu.Lock()
 	// Replace the end key of the original range with the start key of
-	// the new range.
+	// the new range. Reinsert the range since the btree is keyed by range end keys.
+	if s.rangesByKey.Delete((*rangeBTreeItem)(origRng)) == nil {
+		s.mu.Unlock()
+		return util.Errorf("couldn't find range %s in rangesByKey btree", origRng)
+	}
+	// Unlock here since SetDesc() will acquire the lock by calling ProcessRangeDescriptorUpdate().
+	s.mu.Unlock()
+
 	copy := *origRng.Desc()
 	copy.EndKey = append([]byte(nil), newRng.Desc().StartKey...)
 	if err := origRng.SetDesc(&copy); err != nil {
@@ -942,10 +954,14 @@ func (s *Store) SplitRange(origRng, newRng *Range) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := s.addRangeInternal(newRng, true)
-	if err != nil {
-		return err
+	if s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(origRng)) != nil {
+		return util.Errorf("couldn't insert range %v in rangesByKey btree", origRng)
 	}
+	err := s.addRangeInternal(newRng)
+	if err != nil {
+		return util.Errorf("couldn't insert range %v in rangesByKey btree", newRng)
+	}
+
 	s.feed.splitRange(origRng, newRng)
 	return nil
 }
@@ -992,7 +1008,7 @@ func (s *Store) MergeRange(subsumingRng *Range, updatedEndKey proto.Key, subsume
 func (s *Store) AddRange(rng *Range) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := s.addRangeInternal(rng, true)
+	err := s.addRangeInternal(rng)
 	if err != nil {
 		return err
 	}
@@ -1000,12 +1016,10 @@ func (s *Store) AddRange(rng *Range) error {
 	return nil
 }
 
-// addRangeInternal adds the range to the ranges map and the rangesByKey slice.
-// If resort is true, the rangesByKey slice is sorted; this is optional to
-// allow many ranges to be added and the sort only invoked once. This method
-// presupposes the store's lock is held. Returns a rangeAlreadyExists error if
-// a range with the same Raft ID has already been added to this store.
-func (s *Store) addRangeInternal(rng *Range, resort bool) error {
+// addRangeInternal adds the range to the ranges map and the rangesByKey btree.
+// This method presupposes the store's lock is held. Returns a rangeAlreadyExists
+// error if a range with the same Raft ID has already been added to this store.
+func (s *Store) addRangeInternal(rng *Range) error {
 	if !rng.isInitialized() {
 		return util.Errorf("attempted to add uninitialized range %s", rng)
 	}
@@ -1015,9 +1029,13 @@ func (s *Store) addRangeInternal(rng *Range, resort bool) error {
 	if err := s.addRangeToRangeMap(rng); err != nil {
 		return err
 	}
-	s.rangesByKey = append(s.rangesByKey, rng)
-	if resort {
-		sort.Sort(s.rangesByKey)
+
+	if s.rangesByKey.Has((*rangeBTreeItem)(rng)) {
+		return &rangeAlreadyExists{rng}
+	}
+	if exRngItem := s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(rng)); exRngItem != nil {
+		return util.Errorf("range for start key %v already exists in rangesByKey btree",
+			(*Range)(exRngItem.(*rangeBTreeItem)).Desc().StartKey)
 	}
 	return nil
 }
@@ -1032,7 +1050,7 @@ func (s *Store) addRangeToRangeMap(rng *Range) error {
 }
 
 // RemoveRange removes the range from the store's range map and from
-// the sorted rangesByKey slice.
+// the sorted rangesByKey btree.
 func (s *Store) RemoveRange(rng *Range) error {
 	// RemoveGroup needs to access the storage, which in turn needs the
 	// lock. Some care is needed to avoid deadlocks.
@@ -1043,18 +1061,11 @@ func (s *Store) RemoveRange(rng *Range) error {
 	defer s.mu.Unlock()
 
 	delete(s.ranges, rng.Desc().RaftID)
-	// Find the range in rangesByKey slice and swap it to end of slice
-	// and truncate.
-	n := sort.Search(len(s.rangesByKey), func(i int) bool {
-		return bytes.Compare(rng.Desc().StartKey, s.rangesByKey[i].Desc().EndKey) < 0
-	})
-	if n >= len(s.rangesByKey) || rng.Desc().RaftID != s.rangesByKey[n].Desc().RaftID {
-		return util.Errorf("couldn't find range in rangesByKey slice")
+	deleted := s.rangesByKey.Delete((*rangeBTreeItem)(rng))
+	if deleted == nil {
+		return util.Errorf("couldn't find range in rangesByKey btree")
 	}
-	s.rangesByKey = append(s.rangesByKey[:n], s.rangesByKey[n+1:]...)
-
 	s.scanner.RemoveRange(rng)
-
 	return nil
 }
 
@@ -1075,8 +1086,13 @@ func (s *Store) ProcessRangeDescriptorUpdate(rng *Range) error {
 	}
 	delete(s.uninitRanges, rng.Desc().RaftID)
 
-	s.rangesByKey = append(s.rangesByKey, rng)
-	sort.Sort(s.rangesByKey)
+	if s.rangesByKey.Has((*rangeBTreeItem)(rng)) {
+		return &rangeAlreadyExists{rng}
+	}
+	if exRngItem := s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(rng)); exRngItem != nil {
+		return util.Errorf("range for start key %v already exists in rangesByKey btree",
+			(*Range)(exRngItem.(*rangeBTreeItem)).Desc().StartKey)
+	}
 	return nil
 }
 
