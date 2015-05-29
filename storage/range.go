@@ -221,7 +221,7 @@ func NewRange(desc *proto.RangeDescriptor, rm rangeManager) (*Range, error) {
 		respCache:   NewResponseCache(desc.RaftID, rm.Engine()),
 		pendingCmds: map[cmdIDKey]*pendingCmd{},
 	}
-	r.SetDescWithoutProcessUpdate(desc)
+	r.setDescWithoutProcessUpdate(desc)
 
 	lastIndex, err := r.loadLastIndex()
 	if err != nil {
@@ -431,7 +431,7 @@ func (r *Range) Desc() *proto.RangeDescriptor {
 // as is the case for merging, splitting and updating the replica set.
 // TODO(bdarnell): Revisit the metaLock.
 func (r *Range) SetDesc(desc *proto.RangeDescriptor) error {
-	atomic.StorePointer(&r.desc, unsafe.Pointer(desc))
+	r.setDescWithoutProcessUpdate(desc)
 	if r.rm == nil {
 		// r.rm is null in some tests.
 		return nil
@@ -439,9 +439,9 @@ func (r *Range) SetDesc(desc *proto.RangeDescriptor) error {
 	return r.rm.ProcessRangeDescriptorUpdate(r)
 }
 
-// SetDescWithoutProcessUpdate updates the range descriptor without calling
+// setDescWithoutProcessUpdate updates the range descriptor without calling
 // ProcessRangeDescriptorUpdate.
-func (r *Range) SetDescWithoutProcessUpdate(desc *proto.RangeDescriptor) {
+func (r *Range) setDescWithoutProcessUpdate(desc *proto.RangeDescriptor) {
 	atomic.StorePointer(&r.desc, unsafe.Pointer(desc))
 }
 

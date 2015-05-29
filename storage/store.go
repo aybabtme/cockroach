@@ -754,10 +754,10 @@ func (s *Store) GetRange(raftID int64) (*Range, error) {
 	return nil, proto.NewRangeNotFoundError(raftID)
 }
 
-// LookupRange looks up a range via binary search over the sorted
-// "rangesByKey" btree. Returns nil if no range is found for
-// specified key range. Note that the specified keys are transformed
-// using Key.Address() to ensure we lookup ranges correctly for local
+// LookupRange looks up a range via the sorted "rangesByKey"
+// btree. Returns nil if no range is found for specified key
+// range. Note that the specified keys are transformed using
+// Key.Address() to ensure we lookup ranges correctly for local
 // keys. When end is nill, a range that contains start is looked up.
 func (s *Store) LookupRange(start, end proto.Key) *Range {
 	s.mu.RLock()
@@ -947,7 +947,7 @@ func (s *Store) SplitRange(origRng, newRng *Range) error {
 
 	copy := *origRng.Desc()
 	copy.EndKey = append([]byte(nil), newRng.Desc().StartKey...)
-	origRng.SetDescWithoutProcessUpdate(&copy)
+	origRng.setDescWithoutProcessUpdate(&copy)
 
 	if s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(origRng)) != nil {
 		s.mu.Unlock()
@@ -1088,7 +1088,7 @@ func (s *Store) ProcessRangeDescriptorUpdate(rng *Range) error {
 		return &rangeAlreadyExists{rng}
 	}
 	if exRngItem := s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(rng)); exRngItem != nil {
-		return util.Errorf("range for start key %v already exists in rangesByKey btree",
+		return util.Errorf("range for end key %v already exists in rangesByKey btree",
 			(*Range)(exRngItem.(*rangeBTreeItem)).Desc().StartKey)
 	}
 	return nil
