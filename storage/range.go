@@ -221,8 +221,7 @@ func NewRange(desc *proto.RangeDescriptor, rm rangeManager) (*Range, error) {
 		respCache:   NewResponseCache(desc.RaftID, rm.Engine()),
 		pendingCmds: map[cmdIDKey]*pendingCmd{},
 	}
-	// Do not call SetDesc to avoid calling ProcessRangeDescriptorUpdate().
-	atomic.StorePointer(&r.desc, unsafe.Pointer(desc))
+	r.SetDescWithoutProcessUpdate(desc)
 
 	lastIndex, err := r.loadLastIndex()
 	if err != nil {
@@ -438,6 +437,12 @@ func (r *Range) SetDesc(desc *proto.RangeDescriptor) error {
 		return nil
 	}
 	return r.rm.ProcessRangeDescriptorUpdate(r)
+}
+
+// SetDescWithoutProcessUpdate updates the range descriptor without calling
+// ProcessRangeDescriptorUpdate.
+func (r *Range) SetDescWithoutProcessUpdate(desc *proto.RangeDescriptor) {
+	atomic.StorePointer(&r.desc, unsafe.Pointer(desc))
 }
 
 // GetReplica returns the replica for this range from the range descriptor.

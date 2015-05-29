@@ -944,26 +944,24 @@ func (s *Store) SplitRange(origRng, newRng *Range) error {
 		s.mu.Unlock()
 		return util.Errorf("couldn't find range %s in rangesByKey btree", origRng)
 	}
-	// Unlock here since SetDesc() will acquire the lock by calling ProcessRangeDescriptorUpdate().
-	s.mu.Unlock()
 
 	copy := *origRng.Desc()
 	copy.EndKey = append([]byte(nil), newRng.Desc().StartKey...)
-	if err := origRng.SetDesc(&copy); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	origRng.SetDescWithoutProcessUpdate(&copy)
+
 	if s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(origRng)) != nil {
+		s.mu.Unlock()
 		return util.Errorf("couldn't insert range %v in rangesByKey btree", origRng)
 	}
 	err := s.addRangeInternal(newRng)
 	if err != nil {
+		s.mu.Unlock()
 		return util.Errorf("couldn't insert range %v in rangesByKey btree", newRng)
 	}
 
 	s.feed.splitRange(origRng, newRng)
-	return nil
+	s.mu.Unlock()
+	return s.ProcessRangeDescriptorUpdate(origRng)
 }
 
 // MergeRange expands the subsuming range to absorb the subsumed range.
@@ -1070,8 +1068,8 @@ func (s *Store) RemoveRange(rng *Range) error {
 }
 
 // ProcessRangeDescriptorUpdate is called whenever a range's
-// descriptor is updated. Currently, it adds a range to the rangesByS
-// slice if it has not yet been added.
+// descriptor is updated. Currently, it adds a range to the rangesByKey
+// btree if it has not yet been added.
 func (s *Store) ProcessRangeDescriptorUpdate(rng *Range) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
