@@ -938,10 +938,10 @@ func (s *Store) SplitRange(origRng, newRng *Range) error {
 	}
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	// Replace the end key of the original range with the start key of
 	// the new range. Reinsert the range since the btree is keyed by range end keys.
 	if s.rangesByKey.Delete((*rangeBTreeItem)(origRng)) == nil {
-		s.mu.Unlock()
 		return util.Errorf("couldn't find range %s in rangesByKey btree", origRng)
 	}
 
@@ -950,18 +950,14 @@ func (s *Store) SplitRange(origRng, newRng *Range) error {
 	origRng.setDescWithoutProcessUpdate(&copy)
 
 	if s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(origRng)) != nil {
-		s.mu.Unlock()
 		return util.Errorf("couldn't insert range %v in rangesByKey btree", origRng)
 	}
-	err := s.addRangeInternal(newRng)
-	if err != nil {
-		s.mu.Unlock()
+	if err := s.addRangeInternal(newRng); err != nil {
 		return util.Errorf("couldn't insert range %v in rangesByKey btree", newRng)
 	}
 
 	s.feed.splitRange(origRng, newRng)
-	s.mu.Unlock()
-	return s.ProcessRangeDescriptorUpdate(origRng)
+	return s.processRangeDescriptorUpdateLocked(origRng)
 }
 
 // MergeRange expands the subsuming range to absorb the subsumed range.
@@ -1072,7 +1068,10 @@ func (s *Store) RemoveRange(rng *Range) error {
 func (s *Store) ProcessRangeDescriptorUpdate(rng *Range) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.processRangeDescriptorUpdateLocked(rng)
+}
 
+func (s *Store) processRangeDescriptorUpdateLocked(rng *Range) error {
 	if !rng.isInitialized() {
 		return util.Errorf("attempted to process uninitialized range %s", rng)
 	}
