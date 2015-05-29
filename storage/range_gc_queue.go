@@ -60,7 +60,7 @@ func (q *rangeGCQueue) needsLeaderLease() bool {
 // and if so at what priority. Currently all inactive ranges are
 // considered for possible GC at equal priority.
 func (q *rangeGCQueue) shouldQueue(now proto.Timestamp, rng *Range) (bool, float64) {
-	if _, expired := rng.HasLeaderLease(now); !expired {
+	if held, expired := rng.HasLeaderLease(now); held && !expired {
 		// If anyone holds a non-expired lease and we know about it, we
 		// have recently been an active member of the range.  This is not
 		// a guarantee that the range is not garbage (we could have just
