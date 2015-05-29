@@ -1032,8 +1032,8 @@ func (s *Store) addRangeInternal(rng *Range) error {
 		return &rangeAlreadyExists{rng}
 	}
 	if exRngItem := s.rangesByKey.ReplaceOrInsert(rng); exRngItem != nil {
-		return util.Errorf("range for start key %v already exists in rangesByKey btree",
-			(exRngItem.(*Range)).Desc().StartKey)
+		return util.Errorf("range for key %v already exists in rangesByKey btree",
+			(exRngItem.(*Range)).getKey())
 	}
 	return nil
 }
@@ -1090,8 +1090,8 @@ func (s *Store) processRangeDescriptorUpdateLocked(rng *Range) error {
 		return &rangeAlreadyExists{rng}
 	}
 	if exRngItem := s.rangesByKey.ReplaceOrInsert(rng); exRngItem != nil {
-		return util.Errorf("range for end key %v already exists in rangesByKey btree",
-			(exRngItem.(*Range)).Desc().StartKey)
+		return util.Errorf("range for key %v already exists in rangesByKey btree",
+			(exRngItem.(*Range)).getKey())
 	}
 	return nil
 }
