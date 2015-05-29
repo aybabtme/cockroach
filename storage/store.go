@@ -1059,8 +1059,7 @@ func (s *Store) RemoveRange(rng *Range) error {
 	defer s.mu.Unlock()
 
 	delete(s.ranges, rng.Desc().RaftID)
-	deleted := s.rangesByKey.Delete((*rangeBTreeItem)(rng))
-	if deleted == nil {
+	if s.rangesByKey.Delete((*rangeBTreeItem)(rng)) == nil {
 		return util.Errorf("couldn't find range in rangesByKey btree")
 	}
 	s.scanner.RemoveRange(rng)
