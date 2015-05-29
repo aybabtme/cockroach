@@ -157,23 +157,27 @@ type rangeKeyItem interface {
 // rangeKeyItem interface and the btree.Item interface.
 type rangeBTreeKey proto.Key
 
+var _ rangeKeyItem = rangeBTreeKey{}
+
 func (k rangeBTreeKey) getKey() proto.Key {
 	return (proto.Key)(k)
 }
+
+var _ btree.Item = rangeBTreeKey{}
 
 func (k rangeBTreeKey) Less(i btree.Item) bool {
 	return k.getKey().Less(i.(rangeKeyItem).getKey())
 }
 
-// rangeBTreeItem is a type alias of Range that implements the rangeKeyItem
-// interface and the btree.Item interface.
-type rangeBTreeItem Range
+var _ rangeKeyItem = &Range{}
 
-func (r *rangeBTreeItem) getKey() proto.Key {
-	return (*Range)(r).Desc().EndKey
+func (r *Range) getKey() proto.Key {
+	return r.Desc().EndKey
 }
 
-func (r *rangeBTreeItem) Less(i btree.Item) bool {
+var _ btree.Item = &Range{}
+
+func (r *Range) Less(i btree.Item) bool {
 	return r.getKey().Less(i.(rangeKeyItem).getKey())
 }
 
@@ -199,7 +203,7 @@ func (rs *storeRangeSet) Visit(iterator func(*Range) bool) {
 	rs.store.rangesByKey.Ascend(func(i btree.Item) bool {
 		rs.store.mu.Unlock()
 		defer rs.store.mu.Lock()
-		return iterator((*Range)(i.(*rangeBTreeItem)))
+		return iterator(i.(*Range))
 	})
 }
 
@@ -656,7 +660,7 @@ func (s *Store) maybeSplitRangesByConfigs(configMap PrefixConfigMap) {
 		// Find the range which contains this config prefix, if any.
 		var rng *Range
 		s.rangesByKey.AscendGreaterOrEqual((rangeBTreeKey)(config.Prefix.Next()), func(i btree.Item) bool {
-			rng = (*Range)(i.(*rangeBTreeItem))
+			rng = i.(*Range)
 			return false
 		})
 		// If the config doesn't split the range, continue.
@@ -702,7 +706,7 @@ func (s *Store) setRangesMaxBytes(zoneMap PrefixConfigMap) {
 	// Note that we must iterate through the ranges in lexicographic
 	// order to match the ordering of the zoneMap.
 	s.rangesByKey.Ascend(func(i btree.Item) bool {
-		rng := (*Range)(i.(*rangeBTreeItem))
+		rng := i.(*Range)
 		if idx < len(zoneMap)-1 && !rng.Desc().StartKey.Less(zoneMap[idx+1].Prefix) {
 			idx++
 			zone = zoneMap[idx].Config.(*proto.ZoneConfig)
@@ -767,7 +771,7 @@ func (s *Store) LookupRange(start, end proto.Key) *Range {
 
 	var rng *Range
 	s.rangesByKey.AscendGreaterOrEqual((rangeBTreeKey)(startAddr.Next()), func(i btree.Item) bool {
-		rng = (*Range)(i.(*rangeBTreeItem))
+		rng = i.(*Range)
 		return false
 	})
 	if rng == nil || !rng.Desc().ContainsKeyRange(startAddr, endAddr) {
@@ -941,7 +945,7 @@ func (s *Store) SplitRange(origRng, newRng *Range) error {
 	defer s.mu.Unlock()
 	// Replace the end key of the original range with the start key of
 	// the new range. Reinsert the range since the btree is keyed by range end keys.
-	if s.rangesByKey.Delete((*rangeBTreeItem)(origRng)) == nil {
+	if s.rangesByKey.Delete(origRng) == nil {
 		return util.Errorf("couldn't find range %s in rangesByKey btree", origRng)
 	}
 
@@ -949,7 +953,7 @@ func (s *Store) SplitRange(origRng, newRng *Range) error {
 	copy.EndKey = append([]byte(nil), newRng.Desc().StartKey...)
 	origRng.setDescWithoutProcessUpdate(&copy)
 
-	if s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(origRng)) != nil {
+	if s.rangesByKey.ReplaceOrInsert(origRng) != nil {
 		return util.Errorf("couldn't insert range %v in rangesByKey btree", origRng)
 	}
 	if err := s.addRangeInternal(newRng); err != nil {
@@ -1024,12 +1028,12 @@ func (s *Store) addRangeInternal(rng *Range) error {
 		return err
 	}
 
-	if s.rangesByKey.Has((*rangeBTreeItem)(rng)) {
+	if s.rangesByKey.Has(rng) {
 		return &rangeAlreadyExists{rng}
 	}
-	if exRngItem := s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(rng)); exRngItem != nil {
+	if exRngItem := s.rangesByKey.ReplaceOrInsert(rng); exRngItem != nil {
 		return util.Errorf("range for start key %v already exists in rangesByKey btree",
-			(*Range)(exRngItem.(*rangeBTreeItem)).Desc().StartKey)
+			(exRngItem.(*Range)).Desc().StartKey)
 	}
 	return nil
 }
@@ -1055,7 +1059,7 @@ func (s *Store) RemoveRange(rng *Range) error {
 	defer s.mu.Unlock()
 
 	delete(s.ranges, rng.Desc().RaftID)
-	if s.rangesByKey.Delete((*rangeBTreeItem)(rng)) == nil {
+	if s.rangesByKey.Delete(rng) == nil {
 		return util.Errorf("couldn't find range in rangesByKey btree")
 	}
 	s.scanner.RemoveRange(rng)
@@ -1082,12 +1086,12 @@ func (s *Store) processRangeDescriptorUpdateLocked(rng *Range) error {
 	}
 	delete(s.uninitRanges, rng.Desc().RaftID)
 
-	if s.rangesByKey.Has((*rangeBTreeItem)(rng)) {
+	if s.rangesByKey.Has(rng) {
 		return &rangeAlreadyExists{rng}
 	}
-	if exRngItem := s.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(rng)); exRngItem != nil {
+	if exRngItem := s.rangesByKey.ReplaceOrInsert(rng); exRngItem != nil {
 		return util.Errorf("range for end key %v already exists in rangesByKey btree",
-			(*Range)(exRngItem.(*rangeBTreeItem)).Desc().StartKey)
+			(exRngItem.(*Range)).Desc().StartKey)
 	}
 	return nil
 }

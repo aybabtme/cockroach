@@ -61,7 +61,7 @@ func newTestRangeSet(count int, t *testing.T) *testRangeSet {
 		if err := rng.SetDesc(desc); err != nil {
 			t.Fatal(err)
 		}
-		if exRngItem := rs.rangesByKey.ReplaceOrInsert((*rangeBTreeItem)(rng)); exRngItem != nil {
+		if exRngItem := rs.rangesByKey.ReplaceOrInsert(rng); exRngItem != nil {
 			t.Fatalf("failed to insert range %s", rng)
 		}
 	}
@@ -74,7 +74,7 @@ func (rs *testRangeSet) Visit(iterator func(*Range) bool) {
 	rs.rangesByKey.Ascend(func(i btree.Item) bool {
 		rs.Unlock()
 		defer rs.Lock()
-		return iterator((*Range)(i.(*rangeBTreeItem)))
+		return iterator(i.(*Range))
 	})
 }
 
@@ -93,7 +93,7 @@ func (rs *testRangeSet) remove(index int, t *testing.T) *Range {
 	if rng == nil {
 		t.Fatalf("failed to delete range of end key %s", endKey)
 	}
-	return (*Range)(rng.(*rangeBTreeItem))
+	return rng.(*Range)
 }
 
 // Test implementation of a range queue which adds range to an
